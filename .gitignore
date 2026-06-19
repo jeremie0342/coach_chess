@@ -1,0 +1,58 @@
+# --- Python ---
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# --- Database & cache dumps ---
+data/*
+!data/.gitkeep
+coach_cache/
+
+# --- Stockfish & heavy local binaries (download separately) ---
+stockfish/sf.zip
+stockfish/stockfish/
+*.exe
+
+# --- IDE / OS ---
+.vs/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*~
+*.swp
+
+# --- AI assistant working files (kept local) ---
+.claude/
+.cursor/
+.aider*
+CLAUDE.md
+AGENTS.md
+.assistant/
+
+# --- Personal scratchpads / private docs ---
+memory/
+notes/
+TODO.local.md
+docs/unity/
+private/
+.private/
+
+# --- Local secrets ---
+*.local
+*.secret
+secrets/
