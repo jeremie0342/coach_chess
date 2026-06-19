@@ -9,7 +9,9 @@ tactical and positional weaknesses, builds a personalized lesson plan
 every day, and provides interactive drill modes for openings, puzzles,
 and play-from-position.
 
-A Unity 3D frontend is planned; the API under `/api/v1` is the contract.
+A Unity 6 frontend consumes this API:
+**[jeremie0342/chess_coach](https://github.com/jeremie0342/chess_coach)**.
+The API under `/api/v1` is the contract between the two repositories.
 
 ---
 
