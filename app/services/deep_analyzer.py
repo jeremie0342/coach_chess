@@ -46,15 +46,19 @@ async def _deep_one(
     session: AsyncSession,
     analysis: MoveAnalysis,
     move: Move,
-    engine: chess.engine.UciProtocol,
+    engine: chess.engine.SimpleEngine,
     depth: int,
     multipv: int = 1,
 ) -> bool:
     """Re-analyze move.fen_before; store in deep_* fields. True if updated."""
+    import asyncio
+    from app.services.stockfish import _engine_lock
     board = chess.Board(move.fen_before)
-    info = await engine.analyse(
-        board, chess.engine.Limit(depth=depth), multipv=multipv
-    )
+    async with _engine_lock:
+        info = await asyncio.to_thread(
+            engine.analyse,
+            board, chess.engine.Limit(depth=depth), multipv=multipv,
+        )
     if isinstance(info, dict):
         info = [info]
     first = info[0]

@@ -221,9 +221,13 @@ async def live_debrief(
     await compute_out_of_book_for_game(session, game, me_player_id=me.id)
     await session.commit()
 
-    # Analyze with Stockfish — single shared engine
+    # Analyze with Stockfish — single shared engine. Live debrief uses a
+    # shallower depth than the background full analysis (depth 20) because it
+    # must return in seconds, not minutes. Critical positions are re-scanned
+    # at depth 28 later by the deep analyzer.
     engine = await get_engine()
-    await analyze_game(session, game, engine, depth=depth, force=False)
+    live_depth = depth or 12
+    await analyze_game(session, game, engine, depth=live_depth, force=False)
 
     # Per-phase stats over MY moves
     my_is_white = game.white_player_id == me.id

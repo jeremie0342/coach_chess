@@ -55,6 +55,8 @@ async def pick_next_due(
     session: AsyncSession,
     kind: ExerciseKind | None = None,
     theme: str | None = None,
+    themes: list[str] | None = None,
+    exclude_themes: list[str] | None = None,
     source_kind: str | None = None,
     rating: int | None = None,
     rating_window: int = 150,
@@ -62,19 +64,30 @@ async def pick_next_due(
     """Pick the next puzzle to serve.
 
     Filters:
-      - kind          : tactic / endgame / opening / ...
-      - theme         : a specific tag in theme_tags (e.g. 'fork', 'missed_win')
-      - source_kind   : 'blunder' (from my own games), 'lichess', 'manual'
-      - rating        : player's current ELO; puzzles within +/- rating_window
-                        are prioritized (use difficulty as proxy for puzzle rating)
+      - kind            : tactic / endgame / opening / ...
+      - theme           : single tag (legacy)
+      - themes          : list of tags, OR semantics (any-of)
+      - exclude_themes  : list of tags to ban (none-of). Useful to filter out
+                          "mate"/"mateInN" tags when user wants a pure motif.
+      - source_kind     : 'blunder' (from my own games), 'lichess', 'manual'
+      - rating          : player's current ELO; puzzles within +/- rating_window
+                          are prioritized
     """
-    from sqlalchemy import func
+    from sqlalchemy import and_, func, not_, or_
     now = datetime.now(timezone.utc)
     base = select(Exercise)
     if kind is not None:
         base = base.where(Exercise.kind == kind)
-    if theme is not None:
-        base = base.where(Exercise.theme_tags.op("?")(theme))
+    # Merge legacy `theme` into `themes` so both work in tandem
+    want_themes = list(themes or [])
+    if theme:
+        want_themes.append(theme)
+    if want_themes:
+        # OR semantics via OR-of single `?` ops (each is JSONB key-exists)
+        base = base.where(or_(*[Exercise.theme_tags.op("?")(t) for t in want_themes]))
+    if exclude_themes:
+        # NOT any-of -> AND of NOTs
+        base = base.where(and_(*[not_(Exercise.theme_tags.op("?")(t)) for t in exclude_themes]))
     if source_kind is not None:
         base = base.where(Exercise.source_kind == source_kind)
     if rating is not None:
@@ -123,12 +136,32 @@ async def pick_next_due(
 class GradedExercise:
     exercise_id: int
     correct: bool
+    complete: bool
     grade: int
+    step: int
     user_uci: str | None
     expected_uci: str
     expected_san: str
+    opponent_uci: str | None
+    opponent_san: str | None
+    fen_after_opponent: str | None
+    next_expected_uci: str | None
+    next_expected_san: str | None
     new_interval_days: int
     new_due_at: datetime
+
+
+def _apply_until_step(board: chess.Board, solution_uci: list[str], step: int) -> None:
+    """Apply trigger + previous (user, opp) pairs so the board matches the
+    position the user is facing for `step`."""
+    upto = min(2 * step + 1, len(solution_uci))
+    for u in solution_uci[:upto]:
+        try:
+            mv = chess.Move.from_uci(u)
+            if mv in board.legal_moves:
+                board.push(mv)
+        except (ValueError, chess.InvalidMoveError):
+            return
 
 
 async def grade_answer(
@@ -136,9 +169,20 @@ async def grade_answer(
     exercise: Exercise,
     user_input: str,
     time_ms: int | None = None,
+    step: int = 0,
 ) -> GradedExercise:
+    solution = list(exercise.solution_uci or [])
+    n_user_steps = max(1, len(solution) // 2)
+    step = max(0, min(step, n_user_steps - 1))
+
+    # Index of expected user move in raw solution list (skip trigger at 0).
+    user_idx = 2 * step + 1
+    expected_uci = solution[user_idx] if user_idx < len(solution) else ""
+
+    # Reconstruct the position the user is facing right now.
     board = chess.Board(exercise.fen)
-    expected_uci = exercise.solution_uci[0] if exercise.solution_uci else ""
+    _apply_until_step(board, solution, step)
+
     expected_san = ""
     if expected_uci:
         try:
@@ -160,34 +204,80 @@ async def grade_answer(
     user_uci = user_move.uci() if user_move else None
     correct = bool(user_move) and (user_uci == expected_uci)
 
-    if correct:
-        q = 5 if (time_ms is not None and time_ms < 8000) else 4
-    elif user_move is None:
-        q = 0
-    else:
-        q = 1
+    is_last_user_step = (step == n_user_steps - 1)
+    complete = correct and is_last_user_step
 
-    state = _state_from(exercise)
-    result = sm2_grade(state, q)
-    exercise.sr_ease = result.new.ease
-    exercise.sr_interval_days = result.new.interval_days
-    exercise.sr_repetitions = result.new.repetitions
-    exercise.sr_due_at = result.new.due_at
-    exercise.sr_last_reviewed_at = result.new.last_reviewed_at
-    exercise.attempts = (exercise.attempts or 0) + 1
-    if correct:
-        exercise.successes = (exercise.successes or 0) + 1
+    opp_uci: str | None = None
+    opp_san: str | None = None
+    fen_after_opp: str | None = None
+    next_expected_uci: str | None = None
+    next_expected_san: str | None = None
+
+    if correct and not is_last_user_step:
+        board.push(user_move)  # type: ignore[arg-type]
+        opp_idx = 2 * step + 2
+        if opp_idx < len(solution):
+            opp_uci = solution[opp_idx]
+            try:
+                mv_opp = chess.Move.from_uci(opp_uci)
+                if mv_opp in board.legal_moves:
+                    opp_san = board.san(mv_opp)
+                    board.push(mv_opp)
+            except Exception:
+                pass
+        fen_after_opp = board.fen()
+        next_idx = 2 * (step + 1) + 1
+        if next_idx < len(solution):
+            next_expected_uci = solution[next_idx]
+            try:
+                next_expected_san = board.san(chess.Move.from_uci(next_expected_uci))
+            except Exception:
+                next_expected_san = next_expected_uci
+
+    # SM-2 only on terminal outcome (failure OR full completion).
+    terminal = (not correct) or complete
+    if terminal:
+        if complete:
+            q = 5 if (time_ms is not None and time_ms < 8000) else 4
+        elif user_move is None:
+            q = 0
+        else:
+            q = 1
+        state = _state_from(exercise)
+        result = sm2_grade(state, q)
+        exercise.sr_ease = result.new.ease
+        exercise.sr_interval_days = result.new.interval_days
+        exercise.sr_repetitions = result.new.repetitions
+        exercise.sr_due_at = result.new.due_at
+        exercise.sr_last_reviewed_at = result.new.last_reviewed_at
+        exercise.attempts = (exercise.attempts or 0) + 1
+        if complete:
+            exercise.successes = (exercise.successes or 0) + 1
+            exercise.last_solved_at = datetime.now(timezone.utc)
+        new_interval = result.new.interval_days
+        new_due = result.new.due_at
+    else:
+        q = 4
+        new_interval = exercise.sr_interval_days or 0
+        new_due = exercise.sr_due_at or datetime.now(timezone.utc)
 
     await session.commit()
     return GradedExercise(
         exercise_id=exercise.id,
         correct=correct,
+        complete=complete,
         grade=q,
+        step=step,
         user_uci=user_uci,
         expected_uci=expected_uci,
         expected_san=expected_san,
-        new_interval_days=result.new.interval_days,
-        new_due_at=result.new.due_at,
+        opponent_uci=opp_uci,
+        opponent_san=opp_san,
+        fen_after_opponent=fen_after_opp,
+        next_expected_uci=next_expected_uci,
+        next_expected_san=next_expected_san,
+        new_interval_days=new_interval,
+        new_due_at=new_due,
     )
 
 

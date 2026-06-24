@@ -155,6 +155,16 @@ async def enqueue_import_full(payload: ImportFullAsyncIn, request: Request) -> E
     return await _enqueue(_arq(request), "import_full_task", payload.username)
 
 
+class ImportLichessAsyncIn(BaseModel):
+    max_games: int = Field(100, ge=1, le=500)
+    username: str | None = None
+
+
+@router.post("/async/import/lichess", response_model=EnqueueResponse)
+async def enqueue_import_lichess(payload: ImportLichessAsyncIn, request: Request) -> EnqueueResponse:
+    return await _enqueue(_arq(request), "import_lichess_task", payload.username, payload.max_games)
+
+
 @router.post("/async/repertoire/me/rebuild", response_model=EnqueueResponse)
 async def enqueue_build_repertoire(request: Request) -> EnqueueResponse:
     return await _enqueue(_arq(request), "build_repertoire_task")

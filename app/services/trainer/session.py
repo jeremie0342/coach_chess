@@ -76,6 +76,37 @@ class GradedAnswer:
     new_interval_days: int
     new_due_at: datetime
     alternates: str | None
+    expected_source: str = "user"        # "gm" | "user"
+    expected_score: float | None = None   # GM winrate from user's side
+    your_usual_uci: str | None = None
+    your_usual_san: str | None = None
+    plays_usual: bool = False
+    is_best_your_usual: bool = False
+
+
+def _best_move_for_node(node: RepertoireNode, board: chess.Board) -> tuple[str | None, str | None, str, float | None]:
+    """Return (best_uci, best_san, source, score_pct).
+
+    Priority: GM main line (most played) > user habit. Falls back gracefully.
+    score_pct is from the user's side perspective (e.g. white winrate for white).
+    """
+    if node.gm_moves:
+        for entry in node.gm_moves:
+            uci = entry.get("uci")
+            if not uci:
+                continue
+            try:
+                mv = chess.Move.from_uci(uci)
+                if mv not in board.legal_moves:
+                    continue
+                san = entry.get("san") or board.san(mv)
+                sw = entry.get("score_white")
+                is_white = str(node.color).endswith("white")
+                score = sw if is_white else (1 - sw) if isinstance(sw, (int, float)) else None
+                return uci, san, "gm", score
+            except (ValueError, chess.InvalidMoveError):
+                continue
+    return node.move_uci, node.move_san, "user", None
 
 
 async def grade_answer(
@@ -84,14 +115,24 @@ async def grade_answer(
     user_input: str,
     time_ms: int | None = None,
 ) -> GradedAnswer:
-    """Grade the user's answer. `user_input` accepted as SAN or UCI."""
-    board = chess.Board(node.fen)
-    expected_uci = node.move_uci
-    expected_san = node.move_san
+    """Grade the user's answer against the OBJECTIVELY BEST move when known.
 
-    # Resolve the user's move
-    user_move: chess.Move | None = None
+    Reference move = GM main line if the node was annotated via Lichess masters,
+    otherwise = user's habitual move (best available signal). The user's habit
+    is always reported back so the UI can show:
+      - "you played the best move (it's also your habit)" — perfect
+      - "you played the best move (you usually play X — keep upgrading)"
+      - "your habit ≠ best move: the best here is Y"
+    """
+    board = chess.Board(node.fen)
+    best_uci, best_san, best_source, best_score = _best_move_for_node(node, board)
+
+    your_usual_uci = node.move_uci
+    your_usual_san = node.move_san
+    is_best_your_usual = bool(best_uci and your_usual_uci and best_uci == your_usual_uci)
+
     user_input = (user_input or "").strip()
+    user_move: chess.Move | None = None
     try:
         user_move = board.parse_san(user_input)
     except (ValueError, chess.InvalidMoveError):
@@ -103,15 +144,21 @@ async def grade_answer(
             user_move = None
 
     user_uci = user_move.uci() if user_move else None
-    correct = bool(user_move) and (user_move.uci() == expected_uci)
+    correct = bool(user_move) and best_uci is not None and (user_uci == best_uci)
+    plays_usual = bool(user_move) and (user_uci == your_usual_uci)
 
-    # Translate into SM-2 quality.
-    # We give partial credit when the played move was a legal alternate
-    # that the user has played meaningfully often in real games.
+    # SM-2 quality:
+    #  - perfect match on best move (and quick): 5
+    #  - best move (slower): 4
+    #  - habit but not best: 1 (we WANT you to learn the upgrade)
+    #  - known alternate (played at least once but neither best nor habit): 2
+    #  - empty / unknown: 0
     if correct:
         q = 5 if (time_ms is not None and time_ms < 4000) else 4
-    elif user_move and _is_known_alternate(node, user_move.uci()):
-        q = 2  # not the main line but a move you've played
+    elif plays_usual:
+        q = 1
+    elif user_move and _is_known_alternate(node, user_uci or ""):
+        q = 2
     else:
         q = 0 if user_move is None else 1
 
@@ -127,14 +174,20 @@ async def grade_answer(
 
     return GradedAnswer(
         node_id=node.id,
-        expected_san=expected_san,
-        expected_uci=expected_uci,
+        expected_san=best_san or "",
+        expected_uci=best_uci or "",
         user_uci=user_uci,
         correct=correct,
         grade=q,
         new_interval_days=result.new.interval_days,
         new_due_at=result.new.due_at,
         alternates=node.notes,
+        expected_source=best_source,
+        expected_score=best_score,
+        your_usual_uci=your_usual_uci,
+        your_usual_san=your_usual_san,
+        plays_usual=plays_usual,
+        is_best_your_usual=is_best_your_usual,
     )
 
 

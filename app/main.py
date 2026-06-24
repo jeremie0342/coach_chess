@@ -11,6 +11,8 @@ from app.api.cards import router as cards_router
 from app.api.coach import router as coach_router
 from app.api.dashboard import router as dashboard_router
 from app.api.exercises import router as exercises_router
+from app.api.identity import router as identity_router
+from app.api.games import router as games_router
 from app.api.explorer import router as explorer_router
 from app.api.export import router as export_router
 from app.api.health import router as health_router
@@ -21,6 +23,7 @@ from app.api.mobile import router as mobile_router
 from app.api.notify import router as notify_router
 from app.api.ocr import router as ocr_router
 from app.api.play import router as play_router
+from app.api.opening_trainer import router as opening_trainer_router
 from app.api.progress import router as progress_router
 from app.api.repertoire import router as repertoire_router
 from app.api.similarity import router as similarity_router
@@ -100,9 +103,11 @@ def create_app() -> FastAPI:
     v1.include_router(trainer_router)
     v1.include_router(coach_router)
     v1.include_router(exercises_router)
+    v1.include_router(games_router)
     v1.include_router(dashboard_router)
     v1.include_router(jobs_router)
     v1.include_router(play_router)
+    v1.include_router(opening_trainer_router)
     v1.include_router(progress_router)
     v1.include_router(export_router)
     v1.include_router(explorer_router)
@@ -114,6 +119,7 @@ def create_app() -> FastAPI:
     v1.include_router(cards_router)
     v1.include_router(ocr_router)
     v1.include_router(notify_router)
+    v1.include_router(identity_router)
     app.include_router(v1)
 
     return app

@@ -15,6 +15,10 @@ from app.services.elo_calibration import calibrate
 from app.services.opening_recommendation import recommend as recommend_openings
 from app.services.personality import compute_personality
 from app.services.progress import take_snapshot
+from app.services.coach.training_phase import (
+    PHASE_THRESHOLDS, PHASE_TEMPLATES,
+    determine_phase, phase_label,
+)
 
 router = APIRouter(prefix="/coach/me", tags=["progress"])
 
@@ -160,6 +164,116 @@ async def snapshot_now(
         "weakness_severities": snap.weakness_severities,
         "repertoire_due": snap.repertoire_due,
         "exercises_due": snap.exercises_due,
+    }
+
+
+@router.get(
+    "/roadmap",
+    summary="450→2000 ELO roadmap: current phase, progress toward next milestone, full phase plan",
+)
+async def roadmap(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
+    me = (await session.execute(
+        select(Player).where(Player.is_me.is_(True))
+    )).scalar_one_or_none()
+    if not me:
+        raise HTTPException(404, "current player not imported")
+
+    # Latest rating: use latest Rapid rating from games table (same logic as dashboard).
+    from sqlalchemy import case, or_
+    from app.models import Game
+    my_rating_col = case(
+        (Game.white_player_id == me.id, Game.white_rating),
+        else_=Game.black_rating,
+    )
+    current_rating = (await session.execute(
+        select(my_rating_col)
+        .where(or_(Game.white_player_id == me.id, Game.black_player_id == me.id))
+        .where(Game.time_class == "rapid")
+        .where(my_rating_col.is_not(None))
+        .order_by(Game.played_at.desc())
+        .limit(1)
+    )).scalar()
+
+    current_phase = determine_phase(current_rating)
+    rapid_30d_ago: int | None = None
+
+    # 30-day delta from snapshots (if available)
+    since = datetime.now(timezone.utc) - timedelta(days=30)
+    earliest = (await session.execute(
+        select(MetricSnapshot)
+        .where(MetricSnapshot.player_id == me.id)
+        .where(MetricSnapshot.taken_at >= since)
+        .where(MetricSnapshot.rating_rapid.is_not(None))
+        .order_by(MetricSnapshot.taken_at.asc())
+        .limit(1)
+    )).scalar_one_or_none()
+    if earliest:
+        rapid_30d_ago = earliest.rating_rapid
+
+    # Phase floors / ceilings
+    floors = {"A": 0, "B": 900, "C": 1300, "D": 1700, "E": 2100}
+    ceilings = {"A": 900, "B": 1300, "C": 1700, "D": 2100, "E": 3000}
+
+    phases_out: list[dict] = []
+    for letter in ["A", "B", "C", "D", "E"]:
+        if letter < current_phase:
+            state = "done"
+        elif letter == current_phase:
+            state = "current"
+        else:
+            state = "upcoming"
+        template = PHASE_TEMPLATES.get(letter, [])
+        phases_out.append({
+            "letter": letter,
+            "label": phase_label(letter),
+            "floor": floors[letter],
+            "ceiling": ceilings[letter],
+            "state": state,
+            "items": [
+                {
+                    "kind": str(s.kind),
+                    "title": s.title,
+                    "target_count": s.target_count,
+                    "minutes": s.minutes,
+                    "rationale": s.rationale,
+                }
+                for s in template
+            ],
+        })
+
+    # Progress toward next milestone (current phase ceiling, capped at 2000 for goal)
+    GOAL = 2000
+    floor = floors[current_phase]
+    ceiling = ceilings[current_phase]
+    next_milestone = ceiling if ceiling <= GOAL else GOAL
+
+    progress_in_phase = None
+    if current_rating is not None:
+        span = max(1, next_milestone - floor)
+        progress_in_phase = max(0.0, min(1.0, (current_rating - floor) / span))
+
+    # Estimate days to next milestone from 30d ELO velocity (very rough)
+    eta_days = None
+    if current_rating is not None and rapid_30d_ago is not None and current_rating > rapid_30d_ago:
+        velocity_per_day = (current_rating - rapid_30d_ago) / 30
+        remaining = next_milestone - current_rating
+        if remaining > 0 and velocity_per_day > 0:
+            eta_days = int(remaining / velocity_per_day)
+
+    return {
+        "goal_rating": GOAL,
+        "current_rating": current_rating,
+        "current_phase": current_phase,
+        "rapid_30d_ago": rapid_30d_ago,
+        "rating_delta_30d": (current_rating - rapid_30d_ago)
+            if current_rating is not None and rapid_30d_ago is not None else None,
+        "next_milestone": next_milestone,
+        "progress_in_phase": round(progress_in_phase, 3) if progress_in_phase is not None else None,
+        "eta_days_to_next_milestone": eta_days,
+        "phases": phases_out,
+        "thresholds": [{"rating": t, "next_phase": p} for t, p in PHASE_THRESHOLDS],
     }
 
 

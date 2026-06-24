@@ -92,18 +92,22 @@ def _render_frame(frame: GifFrame, opts: GifOptions, flip: bool) -> Image.Image:
     board = chess.Board(frame.fen)
     canvas_h = opts.board_size + (opts.caption_height if frame.caption else 0)
     img = Image.new("RGBA", (opts.board_size, canvas_h), opts.bg_color + (255,))
-    d = ImageDraw.Draw(img)
-    _draw_board(d, board, 0, 0, opts.board_size, flip)
 
+    highlights: list[int] = []
     if frame.arrow_uci:
         try:
             mv = chess.Move.from_uci(frame.arrow_uci)
-            _highlight_squares(img, mv.from_square, mv.to_square, opts.board_size, flip)
-            _draw_arrow(img, mv.from_square, mv.to_square, opts.board_size, flip)
+            highlights = [mv.from_square, mv.to_square]
         except (ValueError, chess.InvalidMoveError):
             pass
 
+    _draw_board(
+        img, board, 0, 0, opts.board_size, flip,
+        arrow_uci=frame.arrow_uci, highlight_squares=highlights or None,
+    )
+
     if frame.caption:
+        d = ImageDraw.Draw(img)
         font = _font(20, bold=True)
         d.text(
             (12, opts.board_size + 8),
@@ -132,6 +136,81 @@ def render_gif(frames: Iterable[GifFrame], opts: GifOptions | None = None, *, fl
         optimize=True,
     )
     return out.getvalue()
+
+
+def render_mp4(frames: Iterable[GifFrame], opts: GifOptions | None = None, *, flip: bool = False) -> bytes:
+    """Build an MP4 video from frames using imageio + ffmpeg.
+
+    MP4 is preferable to GIF for sharing on most platforms: pausable,
+    scrubbable, consistent frame rate, and 3-5x smaller. Encoded H.264
+    (libx264) yuv420p so all browsers and players accept it.
+
+    The imageio ffmpeg backend cannot write to a BytesIO buffer — it needs
+    a real file path — so we route through a temp file and read it back.
+    """
+    import os
+    import tempfile
+    import imageio.v2 as imageio
+    import numpy as np
+
+    opts = opts or GifOptions()
+    pil_frames: list[Image.Image] = []
+    for f in frames:
+        pil_frames.append(_render_frame(f, opts, flip=flip).convert("RGB"))
+    if not pil_frames:
+        raise ValueError("no frames")
+
+    # H.264 requires constant resolution + even dimensions. Some frames have
+    # captions (extra strip below the board) and others don't — normalize all
+    # to the max size and pad with background.
+    max_w = max(im.width for im in pil_frames)
+    max_h = max(im.height for im in pil_frames)
+    target_w = max_w + (max_w % 2)
+    target_h = max_h + (max_h % 2)
+    bg = opts.bg_color
+    if any((im.width, im.height) != (target_w, target_h) for im in pil_frames):
+        normalized: list[Image.Image] = []
+        for im in pil_frames:
+            canvas = Image.new("RGB", (target_w, target_h), bg)
+            canvas.paste(im, (0, 0))
+            normalized.append(canvas)
+        pil_frames = normalized
+
+    fps = max(1.0, 1000.0 / opts.frame_duration_ms)
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".mp4", prefix="coach_chess_")
+    os.close(fd)
+    try:
+        # Quality knobs:
+        #  - crf 17  : visually lossless (lower = better; 0 = lossless, 51 = worst)
+        #  - preset slow : let x264 use more CPU for better compression at same CRF
+        #  - tune stillimage : optimized for slow-moving content with text/pieces
+        #  - bf 0    : disable B-frames; cleaner stop-frame scrubbing in players
+        writer = imageio.get_writer(
+            tmp_path, format="ffmpeg", fps=fps, codec="libx264",
+            pixelformat="yuv420p",
+            macro_block_size=1,
+            quality=None,
+            output_params=[
+                "-crf", "17",
+                "-preset", "slow",
+                "-tune", "stillimage",
+                "-bf", "0",
+                "-x264-params", "keyint=15:min-keyint=2",
+            ],
+        )
+        try:
+            for im in pil_frames:
+                writer.append_data(np.asarray(im))
+        finally:
+            writer.close()
+        with open(tmp_path, "rb") as fh:
+            return fh.read()
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 # ---- High-level helpers ----

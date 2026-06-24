@@ -15,6 +15,42 @@ from app.services.lichess_studies import build_pgn_bundle, push_to_study
 router = APIRouter(prefix="/lichess", tags=["lichess"])
 
 
+@router.get("/status", summary="Are Lichess API credentials configured?")
+async def lichess_status() -> dict:
+    """Quick health check : is LICHESS_TOKEN set in settings, and does it work
+    against the Lichess /api/account endpoint?
+    """
+    import httpx
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    token = (settings.lichess_token or "").strip()
+    if not token:
+        return {
+            "configured": False,
+            "username": None,
+            "detail": "LICHESS_TOKEN n'est pas défini dans le .env du backend.",
+        }
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(
+                "https://lichess.org/api/account",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        if r.status_code == 401:
+            return {"configured": True, "username": None, "detail": "Token invalide (401)."}
+        if r.status_code != 200:
+            return {"configured": True, "username": None, "detail": f"Lichess répond {r.status_code}"}
+        data = r.json()
+        return {
+            "configured": True,
+            "username": data.get("username"),
+            "detail": None,
+        }
+    except Exception as e:
+        return {"configured": True, "username": None, "detail": f"Connexion impossible : {e}"}
+
+
 @router.get(
     "/export_bundle.pgn",
     response_class=PlainTextResponse,

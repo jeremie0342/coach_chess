@@ -46,6 +46,7 @@ async def list_weekly_reports(
                 "weakness_deltas": r.weakness_deltas,
                 "top_focus_for_next_week": r.top_focus_for_next_week,
                 "narrative": r.narrative,
+                "details": r.details,
             }
             for r in rows
         ],

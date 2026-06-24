@@ -6,7 +6,9 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
+from app.core.config import get_settings
 from app.services.import_orchestrator import import_full_history, import_month
+from app.services.lichess_importer import import_lichess_user
 
 router = APIRouter(prefix="/import", tags=["imports"])
 
@@ -23,6 +25,33 @@ async def trigger_full_import(
         "skipped": stats.skipped,
         "failed": stats.failed,
         "errors": stats.errors[:20],
+    }
+
+
+@router.post("/lichess", summary="Import recent Lichess games of the configured user")
+async def trigger_lichess_import(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    max_games: Annotated[int, Query(ge=1, le=500)] = 100,
+    username: str | None = None,
+) -> dict:
+    """Pulls max_games most recent Lichess games into DB. Idempotent.
+
+    If `username` is omitted, uses LICHESS_USERNAME from .env.
+    Marks them as belonging to `is_me=True` Player.
+    """
+    settings = get_settings()
+    user = (username or settings.lichess_username or "").strip()
+    if not user:
+        return {"error": "LICHESS_USERNAME not configured in .env (and no username param)"}
+    stats = await import_lichess_user(
+        session, user, max_games=max_games, is_me=True,
+    )
+    return {
+        "lichess_username": user,
+        "imported": stats.imported,
+        "skipped": stats.skipped,
+        "failed": stats.failed,
+        "errors": stats.errors[:10],
     }
 
 

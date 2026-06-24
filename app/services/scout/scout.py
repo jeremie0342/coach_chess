@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field  # noqa: F401
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +24,17 @@ from app.services.openings.out_of_book import compute_out_of_book_for_all_my_gam
 from app.services.scout.opening_stats import (
     OpponentOpeningReport,
     compute_opening_report,
+)
+from app.services.scout.enrichment import (
+    LearningOpeningProbe,
+    OpponentProfile,
+    PhaseQualityStats,
+    RepertoireBranch,
+    compute_opponent_profile,
+    compute_phase_quality,
+    compute_vs_learning_openings,
+    compute_vs_my_repertoire,
+    generate_deterministic_plan,
 )
 from app.services.weakness_engine import refresh_player_weaknesses
 
@@ -37,6 +48,11 @@ class ScoutReport:
     games_skipped: int
     opening_report: OpponentOpeningReport
     weaknesses: list[dict]
+    profile: OpponentProfile | None = None
+    phase_quality: list[PhaseQualityStats] = field(default_factory=list)
+    vs_my_repertoire: list[RepertoireBranch] = field(default_factory=list)
+    vs_learning_openings: list[LearningOpeningProbe] = field(default_factory=list)
+    structured_plan: str | None = None
     battle_plan: str | None = None
     elapsed_s: float = 0.0
 
@@ -122,6 +138,18 @@ async def scout_opponent(
     # 5. Opening profile
     opening_report = await compute_opening_report(session, opponent)
 
+    # 5b. Profile, phase quality, vs my repertoire (the new intel)
+    profile = await compute_opponent_profile(session, opponent)
+    phase_quality = await compute_phase_quality(session, opponent)
+    me_row = (await session.execute(
+        select(Player).where(Player.is_me.is_(True))
+    )).scalar_one_or_none()
+    vs_my_repertoire: list[RepertoireBranch] = []
+    vs_learning_openings: list[LearningOpeningProbe] = []
+    if me_row:
+        vs_my_repertoire = await compute_vs_my_repertoire(session, me_row, opponent)
+        vs_learning_openings = await compute_vs_learning_openings(session, me_row, opponent)
+
     # Pull persisted Weakness rows for output
     w_rows = list((await session.execute(
         select(Weakness).where(Weakness.player_id == opponent.id)
@@ -145,8 +173,17 @@ async def scout_opponent(
         games_skipped=import_stats.skipped,
         opening_report=opening_report,
         weaknesses=weaknesses_out,
+        profile=profile,
+        phase_quality=phase_quality,
+        vs_my_repertoire=vs_my_repertoire,
+        vs_learning_openings=vs_learning_openings,
         battle_plan=None,
         elapsed_s=time.perf_counter() - started,
+    )
+
+    # Deterministic plan — always built, instantaneous, regardless of LLM flag
+    report.structured_plan = generate_deterministic_plan(
+        profile, phase_quality, opening_report, weaknesses_out,
     )
 
     # 6. LLM synthesis (optional)
@@ -160,7 +197,7 @@ async def scout_opponent(
                         ChatMessage(role="user", content=prompt + "\n\nProduis le plan de bataille."),
                     ],
                     temperature=0.4,
-                    num_predict=400,
+                    num_predict=220,
                 )
             report.battle_plan = plan
         except Exception as e:

@@ -35,6 +35,10 @@ class PositionSession(Base, TimestampMixin):
     sf_elo: Mapped[int | None]
     sf_depth: Mapped[int] = mapped_column(default=12)
 
+    # Configurable take-back budget (0 = strict, 999 = unlimited).
+    max_undos: Mapped[int] = mapped_column(default=0)
+    undos_used: Mapped[int] = mapped_column(default=0)
+
     status: Mapped[PositionSessionStatus] = mapped_column(
         String(16), default=PositionSessionStatus.ACTIVE, index=True
     )
@@ -48,6 +52,15 @@ class PositionSession(Base, TimestampMixin):
     # Where the position came from, for context (e.g. a puzzle, an endgame, my own game)
     source: Mapped[str | None] = mapped_column(String(32))
     source_ref: Mapped[dict | None] = mapped_column(JSONB)
+
+    # Opening-constrained play : the user (and the engine) must follow a
+    # specific opening line. Out-of-book moves trigger an auto-undo or an
+    # automatic loss depending on the undo budget.
+    opening_key: Mapped[str | None] = mapped_column(String(64))
+    opening_branch_label: Mapped[str | None] = mapped_column(String(128))
+    opening_moves: Mapped[list | None] = mapped_column(JSONB)
+    opening_ply_index: Mapped[int] = mapped_column(default=0)
+    opening_status: Mapped[str | None] = mapped_column(String(32))
 
     moves = relationship(
         "PositionSessionMove",

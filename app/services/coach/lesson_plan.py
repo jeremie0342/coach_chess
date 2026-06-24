@@ -279,8 +279,9 @@ async def compose_daily_plan(
     session: AsyncSession,
     player: Player,
     plan_date: date | None = None,
-    target_minutes: int = 30,
+    target_minutes: int = 60,
     force: bool = False,
+    use_roadmap: bool = True,
 ) -> DailyPlan:
     plan_date = plan_date or datetime.now(timezone.utc).date()
 
@@ -295,9 +296,7 @@ async def compose_daily_plan(
         await session.delete(existing)
         await session.flush()
 
-    candidates, weaknesses, _rating = await _build_candidates(session, player)
-    chosen = _fit_to_budget(candidates, target_minutes)
-
+    candidates, weaknesses, rating = await _build_candidates(session, player)
     focus = weaknesses[0].category if weaknesses else None
     plan = DailyPlan(
         player_id=player.id,
@@ -308,16 +307,84 @@ async def compose_daily_plan(
     session.add(plan)
     await session.flush()
 
-    for idx, c in enumerate(chosen):
-        session.add(DailyPlanItem(
-            plan_id=plan.id,
-            order_index=idx,
-            kind=c.kind,
-            title=c.title,
-            target_count=c.target_count,
-            estimated_minutes=_estimate_minutes(c.kind, c.target_count),
-            filters=c.filters,
-            rationale=c.rationale,
-        ))
+    if use_roadmap:
+        from app.services.coach.training_phase import (
+            build_phase_items, determine_phase,
+        )
+        phase = determine_phase(rating)
+        slots = build_phase_items(phase, target_minutes)
+        # Phase context (label + ELO) is surfaced on /roadmap, so we no longer
+        # inject a redundant coach_note announcing it every day. Plan items
+        # start directly at order_index 0.
+
+        # Inject puzzle filters from top weakness for tactical slots
+        top_themes: list[str] = []
+        for w in weaknesses[:2]:
+            top_themes.extend(WEAKNESS_TO_THEME.get(w.category, []))
+
+        next_idx = 0
+        for s in slots:
+            slot_filters = dict(s.filters or {})
+            if s.kind == DailyItemKind.PUZZLE_FOCUSED and top_themes:
+                slot_filters["themes"] = top_themes[:3]
+            session.add(DailyPlanItem(
+                plan_id=plan.id,
+                order_index=next_idx,
+                kind=s.kind,
+                title=s.title,
+                target_count=s.target_count,
+                estimated_minutes=s.minutes,
+                filters=slot_filters or None,
+                rationale=s.rationale,
+            ))
+            next_idx += 1
+
+        # --- Daily opening drill (white + black active variants) ---
+        # The mastery service picks the next un-mastered variant per color.
+        # We append two opening_study items so the user drills one of each
+        # color every day, until 7 consecutive perfect days unlock mastery.
+        from app.services.opening_mastery import get_or_seed_active, MASTERY_STREAK
+        for color in ("white", "black"):
+            prog = await get_or_seed_active(session, player, color)  # type: ignore[arg-type]
+            if prog is None:
+                continue
+            remaining = max(0, MASTERY_STREAK - (prog.streak_days or 0))
+            title = (
+                f"Étudier {prog.base_name} ({'Blancs' if color == 'white' else 'Noirs'})"
+            )
+            rationale = (
+                f"Drill quotidien : {prog.streak_days}/{MASTERY_STREAK} jours parfaits "
+                f"d'affilée. Encore {remaining} jour(s) pour maîtriser cette ouverture "
+                f"et passer à la suivante."
+            )
+            session.add(DailyPlanItem(
+                plan_id=plan.id,
+                order_index=next_idx,
+                kind=DailyItemKind.OPENING_STUDY,
+                title=title,
+                target_count=1,
+                estimated_minutes=10,
+                filters={
+                    "opening_key": prog.opening_key,
+                    "user_color": color,
+                    "mastery_streak": prog.streak_days or 0,
+                },
+                rationale=rationale,
+            ))
+            next_idx += 1
+    else:
+        chosen = _fit_to_budget(candidates, target_minutes)
+        for idx, c in enumerate(chosen):
+            session.add(DailyPlanItem(
+                plan_id=plan.id,
+                order_index=idx,
+                kind=c.kind,
+                title=c.title,
+                target_count=c.target_count,
+                estimated_minutes=_estimate_minutes(c.kind, c.target_count),
+                filters=c.filters,
+                rationale=c.rationale,
+            ))
+
     await session.commit()
     return plan

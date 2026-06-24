@@ -10,6 +10,10 @@ from app.models.daily_plan import DailyPlan, DailyPlanItem
 from app.models.position_session import PositionSession, PositionSessionMove
 from app.models.metric_snapshot import MetricSnapshot
 from app.models.weekly_report import WeeklyReport
+from app.models.opening_progress import OpeningProgress, OpeningProgressStatus
+from app.models.player_repertoire import PlayerRepertoireEntry
+from app.models.scout_snapshot import ScoutSnapshot
+from app.models.live_debrief import LiveDebriefReport
 
 __all__ = [
     "Player",
@@ -26,4 +30,9 @@ __all__ = [
     "PositionSessionMove",
     "MetricSnapshot",
     "WeeklyReport",
+    "OpeningProgress",
+    "OpeningProgressStatus",
+    "PlayerRepertoireEntry",
+    "ScoutSnapshot",
+    "LiveDebriefReport",
 ]

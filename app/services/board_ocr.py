@@ -31,12 +31,7 @@ import chess
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from app.services.position_card import (
-    DARK_SQUARE,
-    LIGHT_SQUARE,
-    PIECE_UNICODE,
-    _piece_font,
-)
+from app.services.board_render import render_board
 
 logger = logging.getLogger(__name__)
 
@@ -54,24 +49,39 @@ class OcrResult:
 
 
 def _render_piece_template(piece_type: int, color: bool, light_bg: bool) -> np.ndarray:
-    """Render a single piece on a square. Returns HxWx3 uint8 array."""
-    bg = LIGHT_SQUARE if light_bg else DARK_SQUARE
-    img = Image.new("RGB", (TEMPLATE_SIZE, TEMPLATE_SIZE), bg)
-    d = ImageDraw.Draw(img)
-    glyph = PIECE_UNICODE[color][piece_type]
-    font = _piece_font(int(TEMPLATE_SIZE * 0.78))
-    tw = d.textlength(glyph, font=font)
-    d.text(
-        (TEMPLATE_SIZE / 2 - tw / 2, TEMPLATE_SIZE * 0.04),
-        glyph, font=font,
-        fill="black" if color == chess.BLACK else "white",
-    )
-    return np.asarray(img, dtype=np.uint8)
+    """Render a single piece on a square. Returns HxWx3 uint8 array.
+
+    Uses the same SVG renderer as our card/GIF/MP4 endpoints, so OCR templates
+    match coach_chess-generated images perfectly. Also matches Lichess Cburnett
+    pieces fairly closely.
+    """
+    # Pick a target square with the desired background color.
+    # a1 (file 0, rank 0) is DARK in standard view; b1 (file 1, rank 0) is LIGHT.
+    target_sq = chess.B1 if light_bg else chess.A1
+    board = chess.Board.empty()
+    board.set_piece_at(target_sq, chess.Piece(piece_type, color))
+    img = render_board(board, BOARD_SIZE, coordinates=False)
+    sq = BOARD_SIZE // 8
+    f = chess.square_file(target_sq)
+    r = chess.square_rank(target_sq)
+    x0 = f * sq
+    y0 = (7 - r) * sq
+    cropped = img.crop((x0, y0, x0 + sq, y0 + sq)).convert("RGB")
+    return np.asarray(cropped, dtype=np.uint8)
 
 
 def _render_empty_template(light_bg: bool) -> np.ndarray:
-    bg = LIGHT_SQUARE if light_bg else DARK_SQUARE
-    return np.full((TEMPLATE_SIZE, TEMPLATE_SIZE, 3), bg, dtype=np.uint8)
+    """Render an empty square at the actual color of the new wooden theme."""
+    target_sq = chess.B1 if light_bg else chess.A1
+    board = chess.Board.empty()
+    img = render_board(board, BOARD_SIZE, coordinates=False)
+    sq = BOARD_SIZE // 8
+    f = chess.square_file(target_sq)
+    r = chess.square_rank(target_sq)
+    x0 = f * sq
+    y0 = (7 - r) * sq
+    cropped = img.crop((x0, y0, x0 + sq, y0 + sq)).convert("RGB")
+    return np.asarray(cropped, dtype=np.uint8)
 
 
 @lru_cache(maxsize=1)
@@ -110,12 +120,96 @@ def _ncc(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(af, bf) / denom)
 
 
+def _crop_to_board_square(img: Image.Image) -> Image.Image:
+    """If the image is non-square, crop to the most-likely-board square region.
+
+    Heuristic:
+      - Coach_chess cards put the board on the LEFT and a sidebar on the right
+        with text/eval. Cropping to leftmost square removes the sidebar.
+      - Lichess and chess.com screenshots tend to have toolbars on top/bottom;
+        the board itself is roughly centered. Crop to a centered square.
+      - If image is portrait (height > width), center-crop vertically.
+
+    Returns a square image. The 1024x1024 final resize happens downstream.
+    """
+    w, h = img.size
+    if w == h:
+        return img
+    if w > h:
+        # Landscape: board is on the left side (our card layout). The leftmost
+        # square = h x h is the most likely board.
+        # If the leftover (w - h) is at most 25% of width, the board may actually
+        # be centered (Lichess screenshot with toolbars on the sides); else it's
+        # a card and the sidebar is on the right.
+        extra = w - h
+        if extra > w * 0.20:
+            # Substantial sidebar → crop to leftmost square
+            return img.crop((0, 0, h, h))
+        # Small margins → center crop
+        x0 = (w - h) // 2
+        return img.crop((x0, 0, x0 + h, h))
+    # Portrait (h > w): center crop vertically
+    y0 = (h - w) // 2
+    return img.crop((0, y0, w, y0 + w))
+
+
+def _trim_coordinate_margin(img: Image.Image) -> Image.Image:
+    """Detect and trim the coordinate margin around the board.
+
+    chess.svg / Lichess / chess.com all render the actual 8x8 playing area
+    INSIDE a small margin (5-10%) that holds the file letters and rank numbers.
+    If we feed the whole image to the per-cell crop, every cell is misaligned
+    and the OCR sees mostly background → bogus FEN.
+
+    Heuristic: walk inward from each edge until we hit a row/col where the
+    color contrast is high (the alternating squares). The boundary between
+    margin and board is sharp on every standard rendering.
+    """
+    arr = np.asarray(img.convert("RGB"), dtype=np.uint8)
+    h, w = arr.shape[:2]
+
+    # Compute per-row and per-col standard deviation (sum of 3 channels).
+    row_std = arr.reshape(h, -1).std(axis=1)
+    col_std = arr.reshape(h, w, 3).std(axis=(0, 2))
+
+    # Margins are mostly uniform (low std). The board area has high std
+    # because of the alternating square colors and pieces.
+    row_threshold = row_std.max() * 0.20
+    col_threshold = col_std.max() * 0.20
+
+    top = 0
+    while top < h // 4 and row_std[top] < row_threshold:
+        top += 1
+    bottom = h - 1
+    while bottom > 3 * h // 4 and row_std[bottom] < row_threshold:
+        bottom -= 1
+    left = 0
+    while left < w // 4 and col_std[left] < col_threshold:
+        left += 1
+    right = w - 1
+    while right > 3 * w // 4 and col_std[right] < col_threshold:
+        right -= 1
+
+    # Only trim if we found a non-trivial margin (> 1% of the dimension).
+    if top > h * 0.01 or bottom < h - h * 0.01 or left > w * 0.01 or right < w - w * 0.01:
+        cropped = img.crop((left, top, right + 1, bottom + 1))
+        # Force square after trim by center-cropping.
+        nw, nh = cropped.size
+        side = min(nw, nh)
+        x0 = (nw - side) // 2
+        y0 = (nh - side) // 2
+        return cropped.crop((x0, y0, x0 + side, y0 + side))
+    return img
+
+
 def _load_and_normalize(path: str | bytes | Path) -> Image.Image:
     if isinstance(path, (bytes, bytearray)):
         img = Image.open(io.BytesIO(path))
     else:
         img = Image.open(path)
     img = img.convert("RGB")
+    img = _crop_to_board_square(img)
+    img = _trim_coordinate_margin(img)
     if img.size != (BOARD_SIZE, BOARD_SIZE):
         img = img.resize((BOARD_SIZE, BOARD_SIZE), Image.LANCZOS)
     return img

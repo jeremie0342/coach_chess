@@ -45,9 +45,10 @@ Write-Host "  Worker:   launched (separate window)"
 # Sleep so worker registers cron jobs first
 Start-Sleep -Seconds 2
 
-# FastAPI in a new window
+# FastAPI in a new window — run via run_dev.py to force WindowsProactorEventLoop
+# (Stockfish subprocess.exec requires it; default Selector loop crashes).
 Start-Process powershell -ArgumentList "-NoExit", "-Command",
-    "`$env:Path = 'C:\Users\KPS\.local\bin;'+`$env:Path; cd '$PROJECT'; Write-Host 'FastAPI on :8765' -ForegroundColor Yellow; uv run uvicorn app.main:app --host 127.0.0.1 --port 8765"
+    "`$env:Path = 'C:\Users\KPS\.local\bin;'+`$env:Path; cd '$PROJECT'; Write-Host 'FastAPI on :8765' -ForegroundColor Yellow; uv run python run_dev.py"
 Write-Host "  FastAPI:  launched (separate window) on http://127.0.0.1:8765"
 Write-Host "            docs at http://127.0.0.1:8765/docs"
 Write-Host ""

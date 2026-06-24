@@ -61,6 +61,10 @@ class Game(Base, TimestampMixin):
     analysis_status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     analyzed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # Set the first time the user opens this game in the "Lab" (Game Review).
+    # Used by daily plan auto-credit to know if a review item has been honored.
+    lab_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     # Out-of-book = first ply where the played move is no longer recognised
     # theory in our openings table. For the player's own moves only.
     my_out_of_book_ply: Mapped[int | None]

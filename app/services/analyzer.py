@@ -85,7 +85,7 @@ def _to_player_cp(eval_cp: int | None, eval_mate: int | None) -> int:
 async def analyze_game(
     session: AsyncSession,
     game: Game,
-    engine: chess.engine.UciProtocol,
+    engine: chess.engine.SimpleEngine,
     depth: int | None = None,
     skip_book_plies: int = 8,
     multipv: int = 1,
@@ -121,11 +121,15 @@ async def analyze_game(
         if fen in eval_cache:
             return eval_cache[fen]
         board = chess.Board(fen)
-        info = await engine.analyse(
-            board,
-            chess.engine.Limit(depth=depth),
-            multipv=multipv,
-        )
+        import asyncio
+        from app.services.stockfish import _engine_lock
+        async with _engine_lock:
+            info = await asyncio.to_thread(
+                engine.analyse,
+                board,
+                chess.engine.Limit(depth=depth),
+                multipv=multipv,
+            )
         if isinstance(info, dict):
             info = [info]
         first = info[0]

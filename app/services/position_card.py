@@ -17,6 +17,8 @@ from math import atan2, cos, sin
 import chess
 from PIL import Image, ImageDraw, ImageFont
 
+from app.services.board_render import render_board
+
 logger = logging.getLogger(__name__)
 
 
@@ -82,32 +84,18 @@ def _piece_font(size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
-def _draw_board(d: ImageDraw.ImageDraw, board: chess.Board, ox: int, oy: int, size: int, flip: bool) -> None:
-    sq = size // 8
-    piece_font = _piece_font(int(sq * 0.78))
-    for rank in range(8):
-        for file in range(8):
-            is_light = (rank + file) % 2 == 1
-            color = LIGHT_SQUARE if is_light else DARK_SQUARE
-            x = ox + (file if not flip else 7 - file) * sq
-            y = oy + (7 - rank if not flip else rank) * sq
-            d.rectangle([x, y, x + sq, y + sq], fill=color)
-            piece = board.piece_at(chess.square(file, rank))
-            if piece:
-                glyph = PIECE_UNICODE[piece.color][piece.piece_type]
-                tw = d.textlength(glyph, font=piece_font)
-                d.text(
-                    (x + (sq - tw) / 2, y + sq * 0.04),
-                    glyph, font=piece_font,
-                    fill="black" if piece.color == chess.BLACK else "white",
-                )
-    coord_font = _font(int(sq * 0.22))
-    for i in range(8):
-        file_letter = chr(ord("a") + (i if not flip else 7 - i))
-        x = ox + i * sq + sq * 0.04
-        d.text((x, oy + size - sq * 0.30), file_letter, font=coord_font, fill=(80, 80, 80))
-        rank_label = str(8 - i if not flip else i + 1)
-        d.text((ox + sq * 0.04, oy + i * sq + sq * 0.04), rank_label, font=coord_font, fill=(80, 80, 80))
+def _draw_board(
+    canvas: Image.Image,
+    board: chess.Board,
+    ox: int, oy: int, size: int, flip: bool,
+    *, arrow_uci: str | None = None, highlight_squares: list[int] | None = None,
+) -> None:
+    """Render the board via SVG (Cburnett pieces) and paste onto the canvas."""
+    board_img = render_board(
+        board, size, flip=flip,
+        arrow_uci=arrow_uci, highlight_squares=highlight_squares,
+    )
+    canvas.alpha_composite(board_img, (ox, oy))
 
 
 def _square_center(file: int, rank: int, ox: int, oy: int, sq: int, flip: bool) -> tuple[float, float]:
@@ -171,16 +159,23 @@ def render_card(fen: str, opts: CardOptions) -> bytes:
     total_h = opts.board_size
 
     card = Image.new("RGBA", (total_w, total_h), opts.bg_color + (255,))
-    d = ImageDraw.Draw(card)
-    _draw_board(d, board, 0, 0, opts.board_size, opts.flip)
 
+    highlights: list[int] = []
+    arrow_uci: str | None = None
     if opts.best_move_uci:
         try:
             m = chess.Move.from_uci(opts.best_move_uci)
             if m in board.legal_moves:
-                _draw_arrow(card, m.from_square, m.to_square, 0, 0, opts.board_size, opts.flip)
+                arrow_uci = opts.best_move_uci
+                highlights = [m.from_square, m.to_square]
         except (ValueError, chess.InvalidMoveError):
             pass
+
+    _draw_board(
+        card, board, 0, 0, opts.board_size, opts.flip,
+        arrow_uci=arrow_uci, highlight_squares=highlights or None,
+    )
+    d = ImageDraw.Draw(card)
 
     x = opts.board_size + 24
     y = 30

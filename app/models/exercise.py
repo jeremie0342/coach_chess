@@ -58,3 +58,6 @@ class Exercise(Base, TimestampMixin):
 
     attempts: Mapped[int] = mapped_column(default=0)
     successes: Mapped[int] = mapped_column(default=0)
+    # Timestamp of the LAST successful completion. Used by the daily plan
+    # auto-credit pipeline to count "puzzles solved today".
+    last_solved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)

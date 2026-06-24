@@ -58,6 +58,25 @@ def _local_tablebase() -> chess.syzygy.Tablebase | None:
         return None
 
 
+_CATEGORY_TO_WDL: dict[str, int] = {
+    "win": 2,
+    "syzygy-win": 2,
+    "maybe-win": 1,
+    "cursed-win": 1,
+    "draw": 0,
+    "blessed-loss": -1,
+    "maybe-loss": -1,
+    "syzygy-loss": -2,
+    "loss": -2,
+}
+
+
+def _wdl_from_category(cat: str | None) -> int | None:
+    if not cat:
+        return None
+    return _CATEGORY_TO_WDL.get(cat.lower())
+
+
 def _verdict_from_category(cat: str | None) -> Literal["win", "draw", "loss", "unknown"]:
     if cat in ("win", "cursed-win", "maybe-win"):
         return "win"
@@ -116,7 +135,11 @@ async def probe_lichess(fen: str) -> TablebaseProbe | None:
         logger.warning("lichess tablebase probe failed (%s): %s", fen, e)
         return None
     cat = data.get("category")
+    # The Lichess tablebase API exposes `category` (text) but no numeric WDL.
+    # Derive it from category so the frontend can render a meaningful score.
     wdl = data.get("wdl")
+    if wdl is None and cat is not None:
+        wdl = _wdl_from_category(cat)
     dtz = data.get("dtz")
     return TablebaseProbe(
         fen=fen, pieces=pieces, wdl=wdl, dtz=dtz,

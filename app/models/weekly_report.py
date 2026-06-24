@@ -37,3 +37,7 @@ class WeeklyReport(Base, TimestampMixin):
     weakness_deltas: Mapped[dict | None] = mapped_column(JSONB)
     top_focus_for_next_week: Mapped[str | None] = mapped_column(Text)
     narrative: Mapped[str | None] = mapped_column(Text)
+    # All the structured "real report" stats: W/L/D, by color/TC, phase
+    # quality, top 5 mistakes with game IDs, best win + worst loss, days
+    # played, comparison with previous week.
+    details: Mapped[dict | None] = mapped_column(JSONB)

@@ -143,6 +143,18 @@ async def import_recent_task(ctx: dict, username: str, max_months: int = 3, max_
         return {"imported": s.imported, "skipped": s.skipped, "failed": s.failed}
 
 
+async def import_lichess_task(ctx: dict, username: str | None = None, max_games: int = 100) -> dict:
+    from app.core.config import get_settings
+    from app.services.lichess_importer import import_lichess_user
+    settings = get_settings()
+    user = (username or settings.lichess_username or "").strip()
+    if not user:
+        return {"error": "LICHESS_USERNAME not configured"}
+    async with SessionLocal() as session:
+        s = await import_lichess_user(session, user, max_games=max_games, is_me=True)
+        return {"imported": s.imported, "skipped": s.skipped, "failed": s.failed}
+
+
 async def scout_task(
     ctx: dict,
     opponent_username: str,
@@ -264,6 +276,7 @@ TASK_FUNCTIONS: list[Any] = [
     import_full_task,
     import_month_task,
     import_recent_task,
+    import_lichess_task,
     scout_task,
     build_repertoire_task,
     refresh_weaknesses_task,

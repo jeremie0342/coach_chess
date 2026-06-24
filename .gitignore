@@ -27,6 +27,10 @@ stockfish/sf.zip
 stockfish/stockfish/
 *.exe
 
+# --- PyInstaller auto-generated spec (contains absolute paths) ---
+coach_chess_launcher.spec
+*.spec
+
 # --- IDE / OS ---
 .vs/
 .idea/

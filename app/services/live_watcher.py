@@ -28,6 +28,8 @@ from app.services.analyzer import analyze_game
 from app.services.chesscom import ChessComClient
 from app.services.exercises.generator import generate_for_player
 from app.services.openings.out_of_book import compute_out_of_book_for_game
+from app.services.lichess_importer import import_lichess_game
+from app.services.lichess_client import LichessClient
 from app.services.pgn_importer import import_chesscom_game
 from app.services.stockfish import get_engine
 from app.services.weakness_engine import refresh_player_weaknesses
@@ -152,6 +154,56 @@ async def watch_once(
                         ))
                     except Exception as e:
                         logger.warning("Live notify failed: %s", e)
+
+    # --- Lichess pass (optional) ---
+    if settings.lichess_username:
+        try:
+            async with LichessClient(username=settings.lichess_username) as lichess:
+                async for g in lichess.stream_games(max_games=30):
+                    gid = g.get("id")
+                    if not gid:
+                        continue
+                    ext = f"lichess:{gid}"
+                    exists = await session.execute(
+                        select(Game.id).where(Game.external_id == ext)
+                    )
+                    if exists.scalar_one_or_none():
+                        stats.games_skipped += 1
+                        continue
+                    try:
+                        game, action = await import_lichess_game(
+                            session, g, settings.lichess_username.lower(),
+                        )
+                    except Exception as e:
+                        logger.warning("import_lichess_game failed (%s): %s", gid, e)
+                        continue
+                    if game is None or action != "imported":
+                        stats.games_skipped += 1
+                        continue
+                    stats.games_imported += 1
+                    stats.new_game_urls.append(f"https://lichess.org/{gid}")
+                    await session.commit()
+
+                    # Out-of-book + analysis (same pipeline as chess.com path)
+                    try:
+                        await compute_out_of_book_for_game(session, game, me_player_id=me.id)
+                        await session.commit()
+                    except Exception as e:
+                        logger.warning("out-of-book failed for lichess %s: %s", gid, e)
+
+                    try:
+                        engine = await get_engine()
+                        a_stats = await analyze_game(
+                            session, game, engine, depth=depth, force=False,
+                        )
+                        stats.games_analyzed += 1
+                        stats.moves_analyzed += a_stats.moves_analyzed
+                        stats.new_blunders += a_stats.blunders
+                        stats.new_mistakes += a_stats.mistakes
+                    except Exception as e:
+                        logger.warning("analyze_game failed for lichess %s: %s", gid, e)
+        except Exception as e:
+            logger.warning("Lichess pass failed: %s", e)
 
     if refresh_weaknesses_after and stats.games_imported > 0:
         try:

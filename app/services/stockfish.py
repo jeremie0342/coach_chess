@@ -1,8 +1,14 @@
-"""Async wrapper around Stockfish via python-chess UCI engine.
+"""Stockfish service — sync SimpleEngine wrapped in a thread pool.
 
-This is a thin service the rest of the app will use for analysis.
-Engine processes are not free — callers should reuse the singleton via
-get_engine(). The /health endpoint uses ping_engine() for a cheap probe.
+We use python-chess's SimpleEngine (regular subprocess.Popen) instead of the
+async popen_uci, because on Windows uvicorn often runs on SelectorEventLoop
+which does not support asyncio.subprocess_exec. Sync calls are dispatched via
+asyncio.to_thread so callers stay async.
+
+Engine processes are not free — we hold a singleton instance protected by an
+asyncio.Lock to serialise access (SimpleEngine is not thread-safe across
+concurrent analyse() calls). The /health endpoint uses ping_engine() for a
+cheap probe that spawns a throwaway engine.
 """
 from __future__ import annotations
 
@@ -23,59 +29,55 @@ class EngineInfo:
 
 
 _engine_lock = asyncio.Lock()
-_engine: chess.engine.UciProtocol | None = None
-_transport: asyncio.SubprocessTransport | None = None
+_engine: chess.engine.SimpleEngine | None = None
 
 
-async def _spawn_engine() -> tuple[asyncio.SubprocessTransport, chess.engine.UciProtocol]:
+def _spawn_engine_sync() -> chess.engine.SimpleEngine:
     settings = get_settings()
     sf_path = str(settings.stockfish_abs_path)
-    transport, engine = await chess.engine.popen_uci(sf_path)
-    await engine.configure(
+    eng = chess.engine.SimpleEngine.popen_uci(sf_path)
+    eng.configure(
         {
             "Threads": settings.stockfish_threads,
             "Hash": settings.stockfish_hash_mb,
         }
     )
-    return transport, engine
+    return eng
 
 
-async def get_engine() -> chess.engine.UciProtocol:
-    global _engine, _transport
+async def get_engine() -> chess.engine.SimpleEngine:
+    global _engine
     async with _engine_lock:
         if _engine is None:
-            _transport, _engine = await _spawn_engine()
+            _engine = await asyncio.to_thread(_spawn_engine_sync)
         return _engine
 
 
 async def shutdown_engine() -> None:
-    global _engine, _transport
+    global _engine
     async with _engine_lock:
         if _engine is not None:
             try:
-                await _engine.quit()
+                await asyncio.to_thread(_engine.quit)
             except Exception:
                 pass
             _engine = None
-            _transport = None
 
 
 async def ping_engine() -> EngineInfo:
-    """Spawn-and-kill probe — does not touch the cached singleton.
-
-    Used by /health to confirm the binary is reachable without forcing
-    the long-lived engine to start at boot time.
-    """
-    settings = get_settings()
-    transport, engine = await chess.engine.popen_uci(str(settings.stockfish_abs_path))
+    """Spawn-and-kill probe — does not touch the cached singleton."""
+    eng = await asyncio.to_thread(_spawn_engine_sync)
     try:
         return EngineInfo(
-            name=engine.id.get("name", "unknown"),
-            author=engine.id.get("author"),
-            options=list(engine.options.keys())[:8],
+            name=eng.id.get("name", "unknown"),
+            author=eng.id.get("author"),
+            options=list(eng.options.keys())[:8],
         )
     finally:
-        await engine.quit()
+        try:
+            await asyncio.to_thread(eng.quit)
+        except Exception:
+            pass
 
 
 async def analyse_fen(
@@ -87,11 +89,14 @@ async def analyse_fen(
     settings = get_settings()
     board = chess.Board(fen)
     engine = await get_engine()
-    info = await engine.analyse(
-        board,
-        chess.engine.Limit(depth=depth or settings.stockfish_default_depth),
-        multipv=multipv,
-    )
+    # SimpleEngine is not safe for concurrent analyse() — serialise.
+    async with _engine_lock:
+        info = await asyncio.to_thread(
+            engine.analyse,
+            board,
+            chess.engine.Limit(depth=depth or settings.stockfish_default_depth),
+            multipv=multipv,
+        )
     if isinstance(info, dict):
         info = [info]
     results = []

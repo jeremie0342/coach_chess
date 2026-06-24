@@ -8,6 +8,18 @@ from app.services.webhooks import WebhookField, WebhookMessage, notify
 router = APIRouter(prefix="/notify", tags=["notify"])
 
 
+@router.get("/status", summary="Which webhook destinations are configured")
+async def status() -> dict:
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    return {
+        "discord_configured": bool(settings.discord_webhook_url),
+        "slack_configured": bool(settings.slack_webhook_url),
+        "any_configured": bool(settings.discord_webhook_url or settings.slack_webhook_url),
+    }
+
+
 class NotifyField(BaseModel):
     name: str
     value: str

@@ -31,6 +31,11 @@ class Settings(BaseSettings):
 
     chesscom_username: str
     chesscom_base_url: str = "https://api.chess.com/pub"
+    # Optional: Lichess username for importing your Lichess games too.
+    # Both can coexist; analyses + scout aggregate across platforms.
+    lichess_username: str | None = None
+    # Optional display name shown in UI (defaults to chesscom_username).
+    coach_display_name: str | None = None
 
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.1"
